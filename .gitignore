@@ -1,0 +1,9 @@
+__pycache__/
+venv/
+.idea/
+orders
+rektBot.log
+test.py
+history
+bot.sqlite
+config.py
