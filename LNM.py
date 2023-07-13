@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 
 from lnmarkets import rest
 import config
@@ -15,6 +16,7 @@ class LNMarkets:
                    'passphrase': passphrase,
                    'network': 'mainnet'}
         self.client = rest.LNMarketsRest(**options)
+        self.last_running_position = []
         
     def deposit_invoice(self, amount):
         ret = self.client.deposit({'amount': amount, }, format='json')
@@ -27,7 +29,74 @@ class LNMarkets:
             log.info(f"[LNMarkets] API fail to make deposit invoice")
             log.log(15,f"[LNMarkets] API returns {ret}")
             return None
+
+    def open_long(self, margin, leverage):
+        return self.open_market_position('long', margin, leverage)
         
-        
-lnm = LNMarkets(config.lnmarkets['key'], config.lnmarkets['secret'], config.lnmarkets['passphrase'])
+    def open_short(self, margin, leverage):
+        return self.open_market_position('short', margin, leverage)
+
+    def open_market_position(self, side, margin, leverage=100, tp=None):
+        # TODO: Handle TP + SL
+        log.log(15, f"open_market_position({side=}, {margin=}, {leverage=}, {tp=})")
+        if side == 'long':
+            side = 'b'
+        elif side == 'short':
+            side = 's'
+        else:
+            return
+
+        fee = math.ceil(margin * leverage * 0.003)
+        margin = margin - fee
+
+        params = {
+            'type': 'm',
+            'side': side,
+            'leverage': leverage,
+            'margin': margin,  # sats
+            # 'quantity': 1, #dollar
+        }
+        if tp:
+            params['takeprofit'] = tp
+
+        ret = self.client.futures_new_position(params, format='json')
+        log.log(15, f"LNM open position answer: {ret}")
+        if 'code' in ret.keys():
+            return None
+        out = {
+            'id': ret['id'],
+            'price': ret['price'],
+        }
+        return out
+
+    def get_running_positions(self):
+        positions = []
+        ret = self.client.futures_get_positions({'type': 'running'}, format='json')
+        if not 'code' in ret.keys():
+            if len(ret) != len(self.last_running_position):
+                self.last_running_position = ret
+                log.log(15, f"LNM running position update: {ret}")
+            for i in ret:
+                positions.append(i['id'])
+        else:
+            return None
+
+        return positions
+
+    def get_closed_positions(self):
+        positions = {}
+        ret = self.client.futures_get_positions({'type': 'closed'}, format='json')
+        for i in ret:
+            positions[i['id']] = i
+
+        return positions
+
+    def get_price(self):
+        return float(self.client.futures_get_ticker(format='json')['lastPrice'])
+
+    def withdraw(self, invoice, amount):
+        return self.client.withdraw({
+                        'amount': amount,
+                        'invoice': invoice
+                      })
 

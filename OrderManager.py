@@ -148,9 +148,11 @@ class OrderManager(QObject):
         log.log(15, f"set_order_open({data=})")
         order_id = data['order_id']
         price = data['price']
+        lnm_id = data['lnm_id']
         order = self.get_order_by_id(order_id)
         order.status = 'open'
         order.open_price = price
+        order.lnm_id = lnm_id
         order.save()
         self.order_status_open.emit(order)
         self.order_status_updated.emit(order)

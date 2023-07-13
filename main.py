@@ -25,7 +25,9 @@ from OrderManager import OrderManager
 
 # TODO: Backup
 # TODO: Log
+# TODO: DB recovery log
 # TODO: delete paid invoices from CLN and copy data to rektBot.log
+# TODO: handle every case when API call not success
 
 logging.addLevelName(15, "DEBG")
 DEB = 15
@@ -171,7 +173,7 @@ class NostrBot(QObject):
             self.listen_notifications()
             self.check_unpaid_orders()
             self.check_open_orders()
-            time.sleep(1)
+            time.sleep(2)
 
     def listen_notifications(self):
         while self.relay_manager.message_pool.has_events():
@@ -189,11 +191,35 @@ class NostrBot(QObject):
                 self.set_order_expired.emit(order.order_id)
 
     def check_open_orders(self):
-        open_orders = self.order_manager.list_open_orders()
+        db_open_orders = self.order_manager.list_open_orders()
+        lnm_running_orders = self.lnm.get_running_positions()
 
-        for order in open_orders:
-            # TODO: check order state on LNM
-            pass
+        #  If fail to fetch running positions
+        if not lnm_running_orders:
+            return
+        
+        closed_orders = []
+        
+        for order in db_open_orders:
+            # if order closed on LNM side
+            if order.lnm_id not in lnm_running_orders:
+                closed_orders.append(order)
+        
+        # if some closed orders
+        if closed_orders:
+            lnm_closed_orders = self.lnm.get_closed_positions()
+            for order in closed_orders:
+                order_id = order.order_id
+                lnm_id = order.lnm_id
+                lnm_order = lnm_closed_orders[lnm_id]
+                close_price = lnm_order['exit_price']
+                # profit = lnm_order['pl'] - lnm_order['opening_fee'] \
+                #          - lnm_order['closing_fee'] - lnm_order['sum_carry_fees']
+                data = {
+                    'order_id': order_id,
+                    'price': close_price,
+                }
+                self.set_order_close.emit(data)
 
     @staticmethod
     def in_history(hash) -> bool:
@@ -245,7 +271,7 @@ class NostrBot(QObject):
                 
                 leverage = re.findall(pattern_leverage, note_content)
                 if not leverage:
-                    leverage = 1
+                    leverage = 100
                 else:
                     leverage = int(leverage[0])
                 log.log(15,f"{leverage=}")
@@ -254,10 +280,15 @@ class NostrBot(QObject):
                 
                 #  Open order
                 log.log(15, f"{amount=}, {tp=}")
-                if amount and tp:
+                if amount:
+
+                    #  TODO: check minimal amount and leverage (amount * leverage) > 1$
 
                     amount = int(amount[0])
-                    tp = int(tp[0])
+                    if tp:
+                        tp = int(tp[0])
+                    else:
+                        tp = 0
 
                     log.log(15,f"{order_type=}, {amount=}, {leverage=}, {tp=}")
                     log.info(f'[{note_id[:5]}_{note_id[-5:]}] {note_from[:5]}_{note_from[-5:]} request for LONG {amount} sats')
@@ -282,32 +313,15 @@ class NostrBot(QObject):
         log.info(f"Received payment for invoice {order.order_id[:5]}_{order.order_id[-5:]}")
         self.reply_to(order.order_id, order.user, f"I receive your {order.amount} sats, you'll be rekt soon!")
         self.set_order_funding.emit(order.order_id)
+        # TODO: delete invoice on CLN side and log it
     
     def on_expired(self, order):
+        # TODO: Delete invoice on DB and CLN
         pass
     
     def on_funding(self, order):
         self.detach_send_funds_to_lnm(order)
-    
-    def on_funded(self, order):
-        log.info(f'Funding success for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
-        # TODO: Open trade
-        #self.set_order_open.emit({'order_id': order.order_id, 'price': open_price})
-
-    def on_funding_fail(self, order):
-        log.info(f'Funding fail for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
-        #  TODO: implement refund
-        #  TODO: notify admin
-
-    def on_open(self, order):
-        log.info(f'Trade open at {order.open_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
-    
-    def on_close(self, order):
-        log.info(f'Trade close at {order.close_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
-
-    def on_deleted(self, order):
-        pass
-
+        
     def detach_send_funds_to_lnm(self, order):
         order = copy(order)
         worker = Worker(self.send_funds_to_lnm)
@@ -346,6 +360,59 @@ class NostrBot(QObject):
             self.set_order_funding_fail.emit(order.order_id)
         else:
             self.set_order_funded.emit(order.order_id)
+    
+    def on_funded(self, order):
+        log.info(f'Funding success for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
+        # TODO: Log it in separate records
+        # TODO: handle if position fail to open
+        # TODO: Handle TP
+        if order.tp > 0:
+            tp = order.tp
+        else:
+            tp = None
+        if tp:
+            price = self.lnm.get_price()
+            if order.order_type == 'long':
+                if tp < price + 100:
+                    tp = None
+
+            elif order.order_type == 'short':
+                if tp > price - 100:
+                    tp = None
+        if order.tp != tp:
+            if order.order_type == 'long':
+                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll hodl or be rekt!")
+            else:
+                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll be hedged or rekt!")
+        position = self.lnm.open_market_position(order.order_type, order.amount, order.leverage, tp)
+        if not position:
+            log.info("Open position fail!")
+            return
+        open_price = position['price']
+        lnm_id = position['id']
+        params = {'order_id': order.order_id, 'price': open_price, 'lnm_id': lnm_id, }
+        self.set_order_open.emit(params)
+
+    def on_funding_fail(self, order):
+        log.info(f'Funding fail for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
+        #  TODO: implement refund
+        #  TODO: notify admin
+
+    def on_open(self, order):
+        log.info(f'Trade open at {order.open_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
+        if order.order_type == 'long':
+            side = 'LONG'
+        else:
+            side = 'SHORT'
+        self.reply_to(order.order_id, order.user, f'{side} open at {order.open_price}')
+    
+    def on_close(self, order):
+        # TODO: cleanup db and log history?
+        log.info(f'Trade close at {order.close_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
+        self.reply_to(order.order_id, order.user, f'Trade closed at {order.close_price}')
+
+    def on_deleted(self, order):
+        pass
 
 
 app = QCoreApplication()
