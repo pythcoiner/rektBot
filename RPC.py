@@ -22,14 +22,15 @@ class RPC:
         # print(command)
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         if result.stderr:
-            return RPC.to_json(result.sterr)
+            log.log(15, f"rpc_call fail with {command=}: {result.stderr=}")
+            return RPC.to_json(result.stderr)
         else:
             return RPC.to_json(result.stdout)
 
     @staticmethod
     def pay_invoice(bolt11) -> bool:
         log.info(f"[Core Lightning RPC] try to pay Invoice")
-        log.debug(f"[Core Lightning RPC] Invoice: {bolt11}")
+        log.log(15,f"[Core Lightning RPC] Invoice: {bolt11}")
         out = RPC.rpc_call('pay', [bolt11])
 
         if out['status'] == 'complete':
@@ -37,7 +38,7 @@ class RPC:
             return True
         else:
             log.info(f"[Core Lightning RPC] Fail to pay Invoice")
-            log.debug(f"[Core Lightning RPC] {out}")
+            log.log(15,f"[Core Lightning RPC] {out}")
             return False
 
 
@@ -50,7 +51,7 @@ class RPC:
             expiry = str(expiry)
 
         log.info(f"[Core Lightning RPC] Invoice")
-        log.debug(f"Invoice: {amount=}, {label=}, {expiry=}")
+        log.log(15,f"Invoice: {amount=}, {label=}, {expiry=}")
         out = RPC.rpc_call(command="invoice", param=[str(amount * 1000), label
             , f"'rektBot: play with {amount} sats and you will be likely rekt!'", expiry])
 

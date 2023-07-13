@@ -20,11 +20,15 @@ from PySide6.QtCore import QCoreApplication
 
 from RPC import RPC
 from LNM import LNMarkets
-from Order import Order
+from OrderManager import OrderManager
+# from Order import Order
 
 # TODO: Backup
 # TODO: Log
 # TODO: delete paid invoices from CLN and copy data to rektBot.log
+
+logging.addLevelName(15, "DEBG")
+DEB = 15
 
 log = logging.getLogger()
 log.setLevel(logging.DEBUG)
@@ -32,7 +36,7 @@ log.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
 file_handler = logging.FileHandler('rektBot.log')
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(15)
 file_handler.setFormatter(formatter)
 
 stream_handler = logging.StreamHandler()
@@ -61,12 +65,25 @@ class Worker(QThread):
 
 
 class NostrBot(QObject):
+    new_order = Signal(object)
+    set_order_paid = Signal(object)
+    set_order_unpaid = Signal(object)
+    set_order_expired = Signal(object)
+    set_order_funding = Signal(object)
+    set_order_funded = Signal(object)
+    set_order_funding_fail = Signal(object)
+    set_order_open = Signal(object)
+    set_order_close = Signal(object)
+    del_order = Signal(object)
 
     def __init__(self, pk):
         QObject.__init__(self)
 
         #  Quit application on CTRL + C
         signal.signal(signal.SIGINT, self.interupt)
+
+        # TODO: periodicaly check stopped workers in list and delete them
+        self.worker_list = []
 
         self.loop_worker = Worker(self.loop)
 
@@ -77,9 +94,28 @@ class NostrBot(QObject):
 
         self.lnm = LNMarkets(config.lnmarkets['key'], config.lnmarkets['secret'], config.lnmarkets['passphrase'])
 
-        self.order_list = []
-        self.load_orders()
-        log.info(f"Order list length {len(self.order_list)}")
+        self.order_manager = OrderManager()
+        self.order_manager.order_status_new.connect(self.on_new_order)
+        self.order_manager.order_status_unpaid.connect(self.on_unpaid)
+        self.order_manager.order_status_paid.connect(self.on_paid)
+        self.order_manager.order_status_expired.connect(self.on_expired)
+        self.order_manager.order_status_funding.connect(self.on_funding)
+        self.order_manager.order_status_funding_fail.connect(self.on_funding_fail)
+        self.order_manager.order_status_funded.connect(self.on_funded)
+        self.order_manager.order_status_open.connect(self.on_open)
+        self.order_manager.order_status_close.connect(self.on_close)
+        self.order_manager.order_status_deleted.connect(self.on_deleted)
+
+        self.new_order.connect(self.order_manager.new_order)
+        self.set_order_unpaid.connect(self.order_manager.set_order_unpaid)
+        self.set_order_paid.connect(self.order_manager.set_order_paid)
+        self.set_order_expired.connect(self.order_manager.set_order_expired)
+        self.set_order_funding.connect(self.order_manager.set_order_funding)
+        self.set_order_funded.connect(self.order_manager.set_order_funded)
+        self.set_order_funding_fail.connect(self.order_manager.set_order_funding_fail)
+        self.set_order_open.connect(self.order_manager.set_order_open)
+        self.set_order_close.connect(self.order_manager.set_order_close)
+        self.del_order.connect(self.order_manager.del_order)
 
         self.connect_relays()
 
@@ -112,7 +148,7 @@ class NostrBot(QObject):
         time.sleep(0.25)  # allow the messages to send
 
     def publish_to_all_relays(self, msg):
-        log.debug(f"Publish message to all relays({msg})")
+        log.log(15,f"Publish message to all relays({msg})")
         for relay in self.relay_manager.relays.values():
             if relay.policy.should_write:
                 relay.publish(msg)
@@ -120,7 +156,7 @@ class NostrBot(QObject):
     def reply_to(self, note_id, user, msg: str):
         reply = Event(content=msg)
         log.info(f"Reply to note {note_id[:5]}_{note_id[-5:]} from user {user[:5]}_{user[-5:]}")
-        log.debug(f"Message: {msg}")
+        log.log(15,f"Message: {msg}")
         # create 'e' tag reference to the note you're replying to
         reply.add_event_ref(note_id)
 
@@ -133,7 +169,8 @@ class NostrBot(QObject):
     def loop(self, *args, **kwargs):
         while True:
             self.listen_notifications()
-            self.update_orders()
+            self.check_unpaid_orders()
+            self.check_open_orders()
             time.sleep(1)
 
     def listen_notifications(self):
@@ -141,57 +178,22 @@ class NostrBot(QObject):
             event_msg = self.relay_manager.message_pool.get_event()
             self.handle_event(event_msg.event.to_json()[1])
 
-    def update_orders(self):
-        #  handle the status change
-        for i in range(len(self.order_list)):
-            order = self.order_list[i]
-            label = order.id
-            previous_status = order.status
+    def check_unpaid_orders(self):
+        unpaid_orders = self.order_manager.list_unpaid_orders()
 
-            #  Handle unpaid => (paid|expired)
-            if previous_status == 'unpaid':
-                status = RPC.invoice_status(label)
-                #  Status have changed
-                if status != 'unpaid':
+        for order in unpaid_orders:
+            status = RPC.invoice_status(order.order_id)
+            if status == 'paid':
+                self.set_order_paid.emit(order.order_id)
+            elif status == 'expired':
+                self.set_order_expired.emit(order.order_id)
 
-                    self.order_list[i].status = status
+    def check_open_orders(self):
+        open_orders = self.order_manager.list_open_orders()
 
-                    if status == 'paid':
-                        #  Notify user on nostr
-                        log.info(f"Received payment for invoice {label[:5]}_{label[-5:]}")
-                        self.reply_to(label, order.user
-                                      , f"I receive your {order.amount} sats, you'll be rekt soon!")
-
-                        #  Transfer funds to LNMarkets
-                        send = self.send_funds_to_lnm(order.amount)
-                        if not send:
-                            log.info(f'Refund process for invoice {label[:5]}_{label[-5:]}')
-                            #  TODO: implement refund process
-                            #  TODO: Notify admin (nostr?mail?)
-
-                        #  Place order
-
-                        #  Notify user on nostr
-
-                    elif status == 'expired':
-                        log.info(f"Invoice {label[:5]}_{label[-5:]} expired")
-
-        # delete expired/deleted orders
-        order_list = copy(self.order_list)
-
-        buffer = []
-        for order in order_list:
-            if order.status not in ['expired', 'invoice_not_exist']:
-                buffer.append(order)
-            else:
-                label = order.id
-                status = order.status
-                log.debug(f"Invoice {label[:5]}_{label[-5:]} deleted from list: {status}")
-                RPC.del_invoice(label, status)
-
-        self.order_list = buffer
-
-        self.save_orders()
+        for order in open_orders:
+            # TODO: check order state on LNM
+            pass
 
     @staticmethod
     def in_history(hash) -> bool:
@@ -207,55 +209,115 @@ class NostrBot(QObject):
             file.close()
             return False
 
+    # Handle notification
     def handle_event(self, event):
         if not self.in_history(event['id']):
             log.info(f"Get notification")
-            log.debug(f"Event:{event}")
+            log.log(15,f"Event:{event}")
 
             note_id = event['id']
             note_from = event['pubkey']
-            note_content = event['content']
+            note_content = event['content'].lower()
 
-            if ' long ' in event['content']:
-                log.debug("notification is for LONG")
-                pattern = r'\blong\s+(\d+)\b'
+            #  If long or short in content
+            if ' long ' or ' short ' in note_content:
+                log.log(15,"LONG or SHORT command detected in content")
+                pattern_long = r'\blong\s+(\d+)\b'
+                pattern_short = r'\bshort\s+(\d+)\b'
+                pattern_leverage = r'\bx(\d+)\b'
+                pattern_tp = r'\btp(\d+)\b'
+                
+                # Parse params
+                if ('long' in note_content) and ('short' in note_content):
+                    log.log(15,"Both short AND long command in content, return")
+                    return
+                elif 'long' in note_content:
+                    log.log(15,"Command is LONG")
+                    amount = re.findall(pattern_long, note_content)
+                    order_type = 'long'
+                elif 'short' in note_content:
+                    log.log(15,"Command is SHORT")
+                    amount = re.findall(pattern_short, note_content)
+                    order_type = 'short'
+                else:
+                    log.log(15,"Command is unknow")
+                    return
+                
+                leverage = re.findall(pattern_leverage, note_content)
+                if not leverage:
+                    leverage = 1
+                else:
+                    leverage = int(leverage[0])
+                log.log(15,f"{leverage=}")
+                
+                tp = re.findall(pattern_tp, note_content)
+                
+                #  Open order
+                log.log(15, f"{amount=}, {tp=}")
+                if amount and tp:
 
-                amount = re.findall(pattern, note_content)
-                if amount:
-                    amount = amount[0]
-                    log.debug(f"Amount found: {amount}")
+                    amount = int(amount[0])
+                    tp = int(tp[0])
+
+                    log.log(15,f"{order_type=}, {amount=}, {leverage=}, {tp=}")
                     log.info(f'[{note_id[:5]}_{note_id[-5:]}] {note_from[:5]}_{note_from[-5:]} request for LONG {amount} sats')
-                    invoice = RPC.invoice(amount, note_id)
-                    log.info('Generate invoice')
-                    log.debug(f'Invoice: {invoice}')
-                    self.reply_to(note_id, note_from, invoice)
-                    self.create_order(note_id, note_from, 'long', amount, invoice)
+                    self.new_order.emit({'order_id': note_id,
+                                         'user': note_from,
+                                         'amount': amount,
+                                         'order_type': order_type,
+                                         'tp': tp,
+                                         'leverage': leverage,
+                                         })
 
-    def create_order(self, id, user, type, amount, invoice) -> str:
-        status = 'unpaid'
-        profit = '0'
-        raw_order = f"{id}:{user}:{type}:{amount}:{status}:{profit}:{invoice}:\n"
-        order = Order.from_string(raw_order)
-        self.order_list.append(order)
-        self.save_orders()
-
-
-        return invoice
+    def on_new_order(self, order):
+        invoice = RPC.invoice(order.amount, order.order_id)
+        log.info('Generate invoice')
+        log.log(15,f'invoice: {invoice}')
+        self.set_order_unpaid.emit({'order_id': order.order_id, 'invoice': invoice,})
+        
+    def on_unpaid(self, order):
+        self.reply_to(order.order_id, order.user, order.invoice)
     
-    def load_orders(self):
-        self.order_list = []
-        file = open('orders', 'r')
-        orders = file.readlines()
-        for i in orders:
-            self.order_list.append(Order.from_string(i))
+    def on_paid(self, order):
+        log.info(f"Received payment for invoice {order.order_id[:5]}_{order.order_id[-5:]}")
+        self.reply_to(order.order_id, order.user, f"I receive your {order.amount} sats, you'll be rekt soon!")
+        self.set_order_funding.emit(order.order_id)
+    
+    def on_expired(self, order):
+        pass
+    
+    def on_funding(self, order):
+        self.detach_send_funds_to_lnm(order)
+    
+    def on_funded(self, order):
+        log.info(f'Funding success for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
+        # TODO: Open trade
+        #self.set_order_open.emit({'order_id': order.order_id, 'price': open_price})
 
-    def save_orders(self):
-        file = open('orders', 'w')
-        for i in self.order_list:
-            file.write(i.to_string())
+    def on_funding_fail(self, order):
+        log.info(f'Funding fail for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
+        #  TODO: implement refund
+        #  TODO: notify admin
 
-    def send_funds_to_lnm(self, amount) -> bool:
+    def on_open(self, order):
+        log.info(f'Trade open at {order.open_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
+    
+    def on_close(self, order):
+        log.info(f'Trade close at {order.close_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
 
+    def on_deleted(self, order):
+        pass
+
+    def detach_send_funds_to_lnm(self, order):
+        order = copy(order)
+        worker = Worker(self.send_funds_to_lnm)
+        self.worker_list.append(worker)
+        worker.args = (order,)
+        worker.result.connect(self.after_detach_send)
+        worker.start()
+
+    def send_funds_to_lnm(self, order) -> dict:
+        amount = order.amount
         invoice = self.lnm.deposit_invoice(amount)
         success = False
         for i in range(5):
@@ -265,10 +327,25 @@ class NostrBot(QObject):
 
         if not success:
             log.info('LNM funding Fail')
-            return False
+            return {
+                'order': order,
+                'send': False,
+                }
         else:
             log.info("LNM funding Success")
-            return True
+            return {
+                'order': order,
+                'send': True,
+            }
+
+    def after_detach_send(self, ret):
+        order = ret['order']
+        send = ret['send']
+
+        if not send:
+            self.set_order_funding_fail.emit(order.order_id)
+        else:
+            self.set_order_funded.emit(order.order_id)
 
 
 app = QCoreApplication()

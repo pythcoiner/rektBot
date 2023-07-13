@@ -21,11 +21,11 @@ class LNMarkets:
         
         if ret['paymentRequest']:
             log.info(f"[LNMarkets] API process invoice")
-            log.debug(f"[LNMarkets] Invoice: {ret['paymentRequest']}")
+            log.log(15,f"[LNMarkets] Invoice: {ret['paymentRequest']}")
             return ret['paymentRequest']
         else:
             log.info(f"[LNMarkets] API fail to make deposit invoice")
-            log.debug(f"[LNMarkets] API returns {ret}")
+            log.log(15,f"[LNMarkets] API returns {ret}")
             return None
         
         
