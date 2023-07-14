@@ -23,10 +23,16 @@ from LNM import LNMarkets
 from OrderManager import OrderManager
 from lud_16 import LUD16
 
+# TODO: withdraw from LNM send message fail but success and user can fill out LNM account
+# TODO: LNM fee calculated on int value in $
+# TODO: on withdraw fail => order status change back to close status => move to withdraw_fail instead!
+# TODO: lnurl withdraw fail from CLN check with manual invoice
+# TODO: profit calculation is wrong => bot loose money
+# TODO: cannot parse invoice from Phoenix
 # TODO: Random TP
-# TODO: direct deposit/withdraw to/from LNM
 # TODO: min amount = 100sats
 # TODO: delete msg on next step
+# TODO: how to check that LNM deposit invoice expired?
 
 # TODO: handle funding fee
 # TODO: Backup
@@ -339,7 +345,7 @@ class NostrBot(QObject):
             note_content = note_content.lower()
 
             #  If long or short order
-            if ' long ' or ' short ' in note_content:
+            if ('long ' in note_content) or ('short ' in note_content):
                 log.log(15,"LONG or SHORT command detected in content")
                 pattern_long = r'\blong\s+(\d+)\b'
                 pattern_short = r'\bshort\s+(\d+)\b'
@@ -401,7 +407,7 @@ class NostrBot(QObject):
                     'user': note_from,
                     'withdraw_mode': 'lnurl',
                     }
-                self.set_order_withdraw_requested(data)
+                self.set_order_withdraw_requested.emit(data)
 
             elif ('invoice' in note_content) and (note_type == 'dm'):
 
@@ -409,7 +415,7 @@ class NostrBot(QObject):
                     'user': note_from,
                     'withdraw_mode': 'invoice',
                 }
-                self.set_order_withdraw_requested(data)
+                self.set_order_withdraw_requested.emit(data)
 
             elif ('lnbc' in note_content) and (note_type == 'dm'):
                 pattern = r'lnbc\S+'
@@ -419,7 +425,7 @@ class NostrBot(QObject):
                     'user': note_from,
                     'invoice': invoice,
                 }
-                self.set_order_withdraw_receive_invoice(data)
+                self.set_order_withdraw_receive_invoice.emit(data)
 
     def on_new_order(self, order):
         # invoice = RPC.invoice(order.amount, order.order_id)
@@ -511,7 +517,8 @@ class NostrBot(QObject):
         # TODO: cleanup db and log history?
 
     def detach_withdraw(self, data):
-        amount = data["amount"]
+        log.log(15, f"detach_withdraw({data=})")
+        amount = data["total_amount"]
         invoice = data['invoice']
         # withdraw directly from LNM
         if amount > 1000:
@@ -526,10 +533,11 @@ class NostrBot(QObject):
         worker.data = data
         # append worker to list belonging to self for avoid thread stop by garbage collector
         self.worker_list.append(worker)
-        worker.result.connect(self.after_detach_send)
+        worker.result.connect(self.after_detach_withdraw)
         worker.start()
 
     def after_detach_withdraw(self, out):
+        log.log(15, f"after_detach_withdraw({out=})")
         ret = out['return']
         data = out['data']
 
@@ -552,6 +560,7 @@ class NostrBot(QObject):
             self.set_order_withdraw_done.emit(data)
 
     def on_withdraw_requested(self, data):
+        log.log(15, f"on_withdraw_requested({data=})")
         if data['mode'] == 'lnurl':
             user = data['batch_list'][0].user
             if user in self.lnurl_list.keys():
@@ -570,22 +579,27 @@ class NostrBot(QObject):
                 return
         # TODO: maybe this path never used?
         if data['mode'] == 'invoice':
-            # Notify user to send an invoice
-            user = data['batch_list'][0].user
-            amount = data['total_amount']
-            msg = f"Please send me BOLT11 invoice for amount: {amount}sats"
-            self.reply_to(None, user, msg, 'dm')
+            self.detach_withdraw(data)
+            # # Notify user to send an invoice
+            # user = data['batch_list'][0].user
+            # amount = data['total_amount']
+            # msg = f"Please send me BOLT11 invoice for amount: {amount}sats"
+            # self.reply_to(None, user, msg, 'dm')
 
     def on_withdraw_notify_amount(self, data):
+        log.log(15, f"on_withdraw_notify_amount({data})")
         # Notify user to send an invoice
-        user = data['batch_list'][0].user
+        if len(data['batch_list']) == 0:
+            user = data['user']
+        else:
+            user = data['batch_list'][0].user
         amount = data['total_amount']
-        if 'wrong_invoice' in data.keys():
+        if 'wrong_amount' in data.keys():
             wrong = True
         else:
             wrong = False
 
-        if not wrong and amount >0:
+        if not wrong and amount > 0:
             msg = f"Please send me BOLT11 invoice for amount: {amount}sats"
         elif wrong:
             msg = f"Wrong invoice amount, please send me BOLT11 invoice for amount: {amount}sats"
@@ -594,7 +608,9 @@ class NostrBot(QObject):
         self.reply_to(None, user, msg, 'dm')
 
     def on_withdraw_done(self, data):
-        pass
+        log.log(15,f"on_withdraw_done({data=})")
+        msg = f"Successfully withdraw {data['total_amount']}sats!"
+        self.reply_to(None, data['user'], msg, 'dm')
 
     def on_deleted(self, order):
         pass

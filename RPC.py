@@ -32,8 +32,9 @@ class RPC:
         log.info(f"[Core Lightning RPC] try to pay Invoice")
         log.log(15,f"[Core Lightning RPC] Invoice: {bolt11}")
         out = RPC.rpc_call('pay', [bolt11])
+        log.log(15, f"[Core Lightning RPC] answer: {out}")
 
-        if out['status'] == 'complete':
+        if ('status' in out.keys()) and (out['status'] == 'complete'):
             log.info(f"[Core Lightning RPC] Invoice paid")
             return True
         else:

@@ -139,11 +139,17 @@ class LNMarkets:
             return max_amount
 
     def withdraw(self, invoice, amount):
+        log.log(15, f"[LNM]withdraw({invoice=}, {amount=})")
         ret = self.client.withdraw({
                         'amount': amount,
                         'invoice': invoice
-                      })
-        if 'paymentHash' in ret.keys():
+                      }, format='json')
+        log.log(15, f"[LNM] answer: {ret}")
+
+        if type(ret) is not dict:
+            return False
+        elif 'paymentHash' in ret.keys():
             return True
-        return False
+        else:
+            return False
 

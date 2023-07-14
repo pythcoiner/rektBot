@@ -22,7 +22,7 @@ class Order(Model):
     trade_amount = IntegerField()
     margin = IntegerField()
     status = CharField()
-    profit = IntegerField()  # unpaid paid funding funded open close
+    profit = IntegerField()
     invoice = CharField()
     lnm_id = CharField()
     tp = IntegerField(null=True)
@@ -184,7 +184,7 @@ class OrderManager(QObject):
         order_id = data['order_id']
         price = data['price']
         order = self.get_order_by_id(order_id)
-        order.status = 'close'
+        order.status = 'closed'
         order.close_price = price
         log.log(15, f"{order.amount=}, {order.trade_amount=}, {order.margin=}, {order.leverage=}")
 
@@ -205,24 +205,34 @@ class OrderManager(QObject):
         self.order_status_updated.emit(order)
 
     def set_order_withdraw_requested(self, data):
+        log.info('Withdraw request')
         log.log(15, f"set_order_withdraw_requested({data=})")
         withdraw_mode = data['withdraw_mode']
-        closed_orders = Order.objects.filter(status='closed', user=data['user'])
+        closed_orders = Order.select().where(
+            (Order.status == 'closed')
+            & (Order.user == data['user'])
+        )
+        # closed_orders = Order.objects.filter(status='closed', user=data['user'])
         total_amount = 0
         batch_list = []
         for order in closed_orders:
-            balance = order.margin - profit
+            balance = order.margin - order.profit
             if balance > 0:
                 total_amount += balance
                 batch_list.append(order)
+                order.status = 'withdraw_requested'
+                order.save()
             else:
                 order.status = 'liquidated'
                 order.save()
+        if len(batch_list) == 0:
+            log.info('No closed orders')
+            return
 
         data = {
             'batch_list': batch_list,
             'total_amount': total_amount,
-            'mode': mode,
+            'mode': withdraw_mode,
         }
         if withdraw_mode == 'lnurl':
             self.order_status_withdraw_requested.emit(data)
@@ -230,7 +240,7 @@ class OrderManager(QObject):
             self.order_withdraw_notify_amount.emit(data)
 
     def set_order_withdraw_done(self, data):
-        log.log(15, f"set_order_withdraw_done({order_id=})")
+        log.log(15, f"set_order_withdraw_done({data=})")
         batch_list = data["batch_list"]
         for order in batch_list:
             order_id = order.order_id
@@ -240,38 +250,41 @@ class OrderManager(QObject):
         self.order_status_withdraw_done.emit(data)
 
     def set_order_withdraw_receive_invoice(self, data):
-        # data == {user, invoice}
+        log.log(15, f"set_order_withdraw_receive_invoice({data=})")
         user = data['user']
         invoice = data['invoice']
         decoded_invoice = bolt11.decode(invoice)
         amount = decoded_invoice.amount / 1000
-
-        orders = Order.objects.filter(status='withdraw_requested', user=user)
+        orders = Order.select().where(
+            (Order.status == 'withdraw_requested')
+            & (Order.user == data['user'])
+        )
+        # orders = Order.objects.filter(status='withdraw_requested', user=user)
         total_amount = 0
         batch_list = []
         for order in orders:
-            balance = order.margin - profit
+            balance = order.margin - order.profit
             if balance > 0:
                 total_amount += balance
                 batch_list.append(order)
+        data = {
+            'invoice': invoice,
+            'batch_list': batch_list,
+            'total_amount': total_amount,
+            'mode': 'invoice',
+            'user': user,
+        }
 
         if total_amount == amount:
             # send withdraw_request
-            data = {
-                'invoice': invoice,
-                'batch_list': batch_list,
-                'total_amount': total_amount,
-                'mode': mode,
-            }
+
             self.order_status_withdraw_requested.emit(data)
 
         else:
+            log.log(15, f"Wrong amout: {total_amount=} != {amount}")
             # Notify user that invoice don't match
             data['wrong_amount'] = True
             self.order_withdraw_notify_amount.emit(data)
-
-
-
 
     def del_order(self, order_id) -> bool:
         try:
