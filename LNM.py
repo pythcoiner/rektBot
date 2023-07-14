@@ -62,7 +62,11 @@ class LNMarkets:
         ret = self.client.futures_new_position(params, format='json')
         log.log(15, f"LNM open position answer: {ret}")
         if 'code' in ret.keys():
-            return None
+            return
+
+        if ('id' not in ret.keys()) or ('price' not in ret.keys()):
+            return
+
         out = {
             'id': ret['id'],
             'price': ret['price'],
@@ -72,7 +76,7 @@ class LNMarkets:
     def get_running_positions(self):
         positions = []
         ret = self.client.futures_get_positions({'type': 'running'}, format='json')
-        if not 'code' in ret.keys():
+        if type(ret) is list:
             if len(ret) != len(self.last_running_position):
                 self.last_running_position = ret
                 log.log(15, f"LNM running position update: {ret}")
@@ -93,6 +97,22 @@ class LNMarkets:
 
     def get_price(self):
         return float(self.client.futures_get_ticker(format='json')['lastPrice'])
+
+    def get_free_balance(self):
+        ret = self.client.get_user(format='json')
+        if 'balance' in ret.keys():
+            return int(ret['balance'])
+        return
+
+    def get_max_withdraw_amount(self):
+        balance = self.get_free_balance()
+        fee = max(math.ceil(balance * 0.005), 100)
+        max_amount = balance - fee
+        min_amount = 1000
+        if max_amount < min_amount:
+            return
+        else:
+            return max_amount
 
     def withdraw(self, invoice, amount):
         return self.client.withdraw({

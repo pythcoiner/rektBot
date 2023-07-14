@@ -22,22 +22,25 @@ client = LNMarkets(config.lnmarkets['key'], config.lnmarkets['secret'], config.l
 
 # ret = client.get_price()
 # print(json.dumps(ret, indent=2))
-#
+
 # ret = client.open_market_position('long', 200)
 # print(json.dumps(ret, indent=2))
-amount = 1234
 
-print('1')
-invoice = client.deposit_invoice(amount)
+# amount = 20000
+# print('1')
+# invoice = client.deposit_invoice(amount)
+#
+# print('2')
+# RPC.pay_invoice(invoice)
 
-print('2')
-RPC.pay_invoice(invoice)
 
-print('3')
+amount = client.get_max_withdraw_amount()
+
 label = str(round(time.time()))
 refund_invoice = RPC.invoice(amount, label)
+print(refund_invoice)
 
-print('4')
-client.withdraw(refund_invoice, amount)
+print(client.withdraw(refund_invoice, amount))
+
 
 

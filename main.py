@@ -11,7 +11,7 @@ import json
 import ssl
 import time
 from nostr.filter import Filter, Filters
-from nostr.event import Event, EventKind
+from nostr.event import Event, EventKind, EncryptedDirectMessage
 from nostr.relay_manager import RelayManager
 from nostr.message_type import ClientMessageType
 
@@ -22,6 +22,9 @@ from RPC import RPC
 from LNM import LNMarkets
 from OrderManager import OrderManager
 # from Order import Order
+
+# TODO: DM
+# TODO: direct deposit/withdraw to/from LNM
 
 # TODO: Backup
 # TODO: Log
@@ -139,7 +142,7 @@ class NostrBot(QObject):
         # Register to npub notifications
         npub = self.private_key.public_key.hex()
         filters = Filters([Filter(pubkey_refs=[npub]
-                                  , kinds=[EventKind.TEXT_NOTE])])
+                                  , kinds=[EventKind.TEXT_NOTE, EventKind.ENCRYPTED_DIRECT_MESSAGE])])
         log.info(f"Register for notification on pubkey {self.private_key.public_key.bech32()}")
         self.relay_manager.add_subscription_on_all_relays('rektbot', filters)
 
@@ -155,15 +158,19 @@ class NostrBot(QObject):
             if relay.policy.should_write:
                 relay.publish(msg)
 
-    def reply_to(self, note_id, user, msg: str):
-        reply = Event(content=msg)
-        log.info(f"Reply to note {note_id[:5]}_{note_id[-5:]} from user {user[:5]}_{user[-5:]}")
+    def reply_to(self, note_id, user, msg: str, mode: str):
+        log.info(f"Reply to note {note_id[:5]}_{note_id[-5:]} from user {user[:5]}_{user[-5:]}, mode:{mode}")
         log.log(15,f"Message: {msg}")
+
+        if mode == 'note':
+            reply = Event(content=msg)
+            # create 'p' tag reference to the pubkey you're replying to
+            reply.add_pubkey_ref(user)
+        elif mode == 'dm':
+            reply = EncryptedDirectMessage(recipient_pubkey=user, cleartext_content=msg)
+
         # create 'e' tag reference to the note you're replying to
         reply.add_event_ref(note_id)
-
-        # create 'p' tag reference to the pubkey you're replying to
-        reply.add_pubkey_ref(user)
 
         self.private_key.sign_event(reply)
         self.relay_manager.publish_event(reply)
@@ -243,7 +250,17 @@ class NostrBot(QObject):
 
             note_id = event['id']
             note_from = event['pubkey']
-            note_content = event['content'].lower()
+            note_content = event['content']
+            if event['kind'] == EventKind.TEXT_NOTE:
+                note_type = 'note'
+            elif event['kind'] == EventKind.ENCRYPTED_DIRECT_MESSAGE:
+                note_type = 'dm'
+                note_content = self.private_key.decrypt_message(note_content, event['pubkey'])
+                log.log(15, f"Decrypted message = {note_content}")
+            else:
+                return
+
+            note_content = note_content.lower()
 
             #  If long or short in content
             if ' long ' or ' short ' in note_content:
@@ -298,6 +315,7 @@ class NostrBot(QObject):
                                          'order_type': order_type,
                                          'tp': tp,
                                          'leverage': leverage,
+                                         'mode': note_type,
                                          })
 
     def on_new_order(self, order):
@@ -307,11 +325,11 @@ class NostrBot(QObject):
         self.set_order_unpaid.emit({'order_id': order.order_id, 'invoice': invoice,})
         
     def on_unpaid(self, order):
-        self.reply_to(order.order_id, order.user, order.invoice)
+        self.reply_to(order.order_id, order.user, order.invoice, order.mode)
     
     def on_paid(self, order):
         log.info(f"Received payment for invoice {order.order_id[:5]}_{order.order_id[-5:]}")
-        self.reply_to(order.order_id, order.user, f"I receive your {order.amount} sats, you'll be rekt soon!")
+        self.reply_to(order.order_id, order.user, f"I receive your {order.amount} sats, you'll be rekt soon!", order.mode)
         self.set_order_funding.emit(order.order_id)
         # TODO: delete invoice on CLN side and log it
     
@@ -381,9 +399,9 @@ class NostrBot(QObject):
                     tp = None
         if order.tp != tp:
             if order.order_type == 'long':
-                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll hodl or be rekt!")
+                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll hodl or be rekt!", order.mode)
             else:
-                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll be hedged or rekt!")
+                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll be hedged or rekt!", order.mode)
         position = self.lnm.open_market_position(order.order_type, order.amount, order.leverage, tp)
         if not position:
             log.info("Open position fail!")
@@ -404,12 +422,12 @@ class NostrBot(QObject):
             side = 'LONG'
         else:
             side = 'SHORT'
-        self.reply_to(order.order_id, order.user, f'{side} open at {order.open_price}')
+        self.reply_to(order.order_id, order.user, f'{side} open at {order.open_price}', order.mode)
     
     def on_close(self, order):
         # TODO: cleanup db and log history?
         log.info(f'Trade close at {order.close_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
-        self.reply_to(order.order_id, order.user, f'Trade closed at {order.close_price}')
+        self.reply_to(order.order_id, order.user, f'Trade closed at {order.close_price}', order.mode)
 
     def on_deleted(self, order):
         pass

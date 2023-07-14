@@ -8,12 +8,15 @@ from PySide6.QtCore import QObject, Signal
 
 log = logging.getLogger()
 
+
 class Order(Model):
     order_id = CharField(unique=True)
     user = CharField()
     order_type = CharField()
+    mode = CharField()
     amount = IntegerField()
     leverage = IntegerField()
+
     status = CharField()
     profit = IntegerField()  # unpaid paid funding funded open close
     invoice = CharField()
@@ -88,6 +91,7 @@ class OrderManager(QObject):
                       leverage=data['leverage'],
                       open_price=0,
                       close_price=0,
+                      mode=data['mode'],
                       )
         order.save()
         self.order_status_new.emit(order)
