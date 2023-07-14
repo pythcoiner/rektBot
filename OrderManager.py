@@ -1,6 +1,8 @@
 import os
 from typing import Union
 import logging
+import math
+import bolt11
 
 from peewee import *
 
@@ -17,7 +19,8 @@ class Order(Model):
     mode = CharField()
     amount = IntegerField()
     leverage = IntegerField()
-
+    trade_amount = IntegerField()
+    margin = IntegerField()
     status = CharField()
     profit = IntegerField()  # unpaid paid funding funded open close
     invoice = CharField()
@@ -25,6 +28,8 @@ class Order(Model):
     tp = IntegerField(null=True)
     open_price = FloatField(null=True)
     close_price = FloatField(null=True)
+    withdraw_type = CharField()
+    withdraw_data = CharField()
 
     class Meta:
         database = None
@@ -41,6 +46,9 @@ class OrderManager(QObject):
     order_status_funded = Signal(object)
     order_status_open = Signal(object)
     order_status_close = Signal(object)
+    order_status_withdraw_requested = Signal(object)
+    order_status_withdraw_done = Signal(object)
+    order_withdraw_notify_amount = Signal(object)
     order_status_deleted = Signal(object)
 
     def __init__(self, db_path='bot.sqlite'):
@@ -91,9 +99,13 @@ class OrderManager(QObject):
                       lnm_id='',
                       tp=data['tp'],
                       leverage=data['leverage'],
+                      trade_amount=0,
+                      margin=0,
                       open_price=0,
                       close_price=0,
                       mode=data['mode'],
+                      withdraw_type='',
+                      withdraw_data='',
                       )
         order.save()
         self.order_status_new.emit(order)
@@ -159,6 +171,8 @@ class OrderManager(QObject):
         lnm_id = data['lnm_id']
         order = self.get_order_by_id(order_id)
         order.status = 'open'
+        order.trade_amount = data['trade_amount']
+        order.margin = data['margin']
         order.open_price = price
         order.lnm_id = lnm_id
         order.save()
@@ -172,11 +186,92 @@ class OrderManager(QObject):
         order = self.get_order_by_id(order_id)
         order.status = 'close'
         order.close_price = price
-        # TODO: Calculate Profit
-        # TODO: Send back money
+        log.log(15, f"{order.amount=}, {order.trade_amount=}, {order.margin=}, {order.leverage=}")
+
+        profit_percent = (order.close_price / order.open_price) - 1
+        log.log(15, f"{profit_percent=}")
+
+        if order.order_type == 'short':
+            profit_percent = -profit_percent
+            profit = math.floor(order.trade_amount * profit_percent)
+        else:
+            profit = math.ceil(order.trade_amount * profit_percent)
+        log.log(15, f"{profit=}")
+        fee = abs(order.amount - order.margin)
+        log.log(15, f"{fee=}")
+        order.profit = profit - fee
         order.save()
         self.order_status_close.emit(order)
         self.order_status_updated.emit(order)
+
+    def set_order_withdraw_requested(self, data):
+        log.log(15, f"set_order_withdraw_requested({data=})")
+        withdraw_mode = data['withdraw_mode']
+        closed_orders = Order.objects.filter(status='closed', user=data['user'])
+        total_amount = 0
+        batch_list = []
+        for order in closed_orders:
+            balance = order.margin - profit
+            if balance > 0:
+                total_amount += balance
+                batch_list.append(order)
+            else:
+                order.status = 'liquidated'
+                order.save()
+
+        data = {
+            'batch_list': batch_list,
+            'total_amount': total_amount,
+            'mode': mode,
+        }
+        if withdraw_mode == 'lnurl':
+            self.order_status_withdraw_requested.emit(data)
+        elif withdraw_mode == 'invoice':
+            self.order_withdraw_notify_amount.emit(data)
+
+    def set_order_withdraw_done(self, data):
+        log.log(15, f"set_order_withdraw_done({order_id=})")
+        batch_list = data["batch_list"]
+        for order in batch_list:
+            order_id = order.order_id
+            order = self.get_order_by_id(order_id)
+            order.status = 'withdraw_done'
+            order.save()
+        self.order_status_withdraw_done.emit(data)
+
+    def set_order_withdraw_receive_invoice(self, data):
+        # data == {user, invoice}
+        user = data['user']
+        invoice = data['invoice']
+        decoded_invoice = bolt11.decode(invoice)
+        amount = decoded_invoice.amount / 1000
+
+        orders = Order.objects.filter(status='withdraw_requested', user=user)
+        total_amount = 0
+        batch_list = []
+        for order in orders:
+            balance = order.margin - profit
+            if balance > 0:
+                total_amount += balance
+                batch_list.append(order)
+
+        if total_amount == amount:
+            # send withdraw_request
+            data = {
+                'invoice': invoice,
+                'batch_list': batch_list,
+                'total_amount': total_amount,
+                'mode': mode,
+            }
+            self.order_status_withdraw_requested.emit(data)
+
+        else:
+            # Notify user that invoice don't match
+            data['wrong_amount'] = True
+            self.order_withdraw_notify_amount.emit(data)
+
+
+
 
     def del_order(self, order_id) -> bool:
         try:

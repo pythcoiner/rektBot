@@ -11,13 +11,14 @@ log = logging.getLogger()
 
 class LNMarkets:
     
-    def __init__(self, key, secret, passphrase):
+    def __init__(self, key, secret, passphrase, fee=0.002):
         options = {'key': key,
                    'secret': secret,
                    'passphrase': passphrase,
                    'network': 'mainnet'}
         self.client = rest.LNMarketsRest(**options)
         self.last_running_position = []
+        self.fee = fee
         
     def deposit_invoice(self, amount):
         ret = self.client.deposit({'amount': amount, }, format='json')
@@ -66,8 +67,9 @@ class LNMarkets:
         else:
             return
 
-        fee = math.ceil(margin * leverage * 0.003)
+        fee = math.ceil(margin * leverage * self.fee)
         margin = margin - fee
+        trade_amount = math.floor(margin * leverage)
 
         params = {
             'type': 'm',
@@ -90,6 +92,8 @@ class LNMarkets:
         out = {
             'id': ret['id'],
             'price': ret['price'],
+            'trade_amount': trade_amount,
+            'margin': margin,
         }
         return out
 
@@ -135,8 +139,11 @@ class LNMarkets:
             return max_amount
 
     def withdraw(self, invoice, amount):
-        return self.client.withdraw({
+        ret = self.client.withdraw({
                         'amount': amount,
                         'invoice': invoice
                       })
+        if 'paymentHash' in ret.keys():
+            return True
+        return False
 

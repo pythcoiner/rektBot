@@ -41,7 +41,6 @@ class RPC:
             log.log(15,f"[Core Lightning RPC] {out}")
             return False
 
-
     @staticmethod
     def invoice(amount: int, label: str, expiry=600):
         if type(amount) == str:
