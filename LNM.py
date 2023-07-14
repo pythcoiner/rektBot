@@ -2,6 +2,7 @@ import json
 import logging
 import math
 
+import bolt11
 from lnmarkets import rest
 import config
 
@@ -21,14 +22,33 @@ class LNMarkets:
     def deposit_invoice(self, amount):
         ret = self.client.deposit({'amount': amount, }, format='json')
         
-        if ret['paymentRequest']:
+        if 'paymentRequest' in ret.keys():
             log.info(f"[LNMarkets] API process invoice")
             log.log(15,f"[LNMarkets] Invoice: {ret['paymentRequest']}")
-            return ret['paymentRequest']
+            invoice = ret['paymentRequest']
+            decoded_invoice = bolt11.decode(invoice)
+            payment_hash = decoded_invoice.payment_hash
+            return invoice, payment_hash
         else:
             log.info(f"[LNMarkets] API fail to make deposit invoice")
             log.log(15,f"[LNMarkets] API returns {ret}")
             return None
+
+    def deposit_history(self):
+        return self.client.deposit_history({}, format='json')
+
+    def get_deposit_status(self, hash):
+        history = self.deposit_history()
+        if type(history) is not list:
+            return
+        for i in history:
+            if type(i) is not dict:
+                return
+            elif 'payment_hash' in i.keys():
+                if i['payment_hash'] == hash:
+                    return i['success']
+
+        return
 
     def open_long(self, margin, leverage):
         return self.open_market_position('long', margin, leverage)

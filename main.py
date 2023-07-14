@@ -23,14 +23,15 @@ from LNM import LNMarkets
 from OrderManager import OrderManager
 # from Order import Order
 
-# TODO: DM
 # TODO: direct deposit/withdraw to/from LNM
 
 # TODO: Backup
-# TODO: Log
+# TODO: Cleaner Log []
 # TODO: DB recovery log
 # TODO: delete paid invoices from CLN and copy data to rektBot.log
 # TODO: handle every case when API call not success
+# TODO: check msg tp too close when no tp define by user
+# TODO: move history to a peewee DB
 
 logging.addLevelName(15, "DEBG")
 DEB = 15
@@ -93,6 +94,7 @@ class NostrBot(QObject):
         self.loop_worker = Worker(self.loop)
 
         self.private_key = PrivateKey.from_nsec(pk)
+        # print(self.private_key.bech32())
         self.relay_manager = None
         log.info('Start NostrBot')
         log.info(f'Using pubkey {self.private_key.public_key.bech32()}')
@@ -102,11 +104,12 @@ class NostrBot(QObject):
         self.order_manager = OrderManager()
         self.order_manager.order_status_new.connect(self.on_new_order)
         self.order_manager.order_status_unpaid.connect(self.on_unpaid)
-        self.order_manager.order_status_paid.connect(self.on_paid)
+        # self.order_manager.order_status_paid.connect(self.on_paid)
         self.order_manager.order_status_expired.connect(self.on_expired)
         self.order_manager.order_status_funding.connect(self.on_funding)
         self.order_manager.order_status_funding_fail.connect(self.on_funding_fail)
-        self.order_manager.order_status_funded.connect(self.on_funded)
+        # self.order_manager.order_status_funded.connect(self.on_funded)
+        self.order_manager.order_status_paid.connect(self.on_funded)
         self.order_manager.order_status_open.connect(self.on_open)
         self.order_manager.order_status_close.connect(self.on_close)
         self.order_manager.order_status_deleted.connect(self.on_deleted)
@@ -191,11 +194,14 @@ class NostrBot(QObject):
         unpaid_orders = self.order_manager.list_unpaid_orders()
 
         for order in unpaid_orders:
-            status = RPC.invoice_status(order.order_id)
-            if status == 'paid':
+            # status = RPC.invoice_status(order.order_id)
+            status = self.lnm.get_deposit_status(order.deposit_id)
+            if status :
                 self.set_order_paid.emit(order.order_id)
-            elif status == 'expired':
-                self.set_order_expired.emit(order.order_id)
+            #  TODO: handle expired deposit to lnm (timestamp?)
+
+            # elif status == 'expired':
+            #     self.set_order_expired.emit(order.order_id)
 
     def check_open_orders(self):
         db_open_orders = self.order_manager.list_open_orders()
@@ -319,10 +325,11 @@ class NostrBot(QObject):
                                          })
 
     def on_new_order(self, order):
-        invoice = RPC.invoice(order.amount, order.order_id)
+        # invoice = RPC.invoice(order.amount, order.order_id)
+        invoice, hash = self.lnm.deposit_invoice(order.amount,)
         log.info('Generate invoice')
         log.log(15,f'invoice: {invoice}')
-        self.set_order_unpaid.emit({'order_id': order.order_id, 'invoice': invoice,})
+        self.set_order_unpaid.emit({'order_id': order.order_id, 'invoice': invoice, 'hash': hash})
         
     def on_unpaid(self, order):
         self.reply_to(order.order_id, order.user, order.invoice, order.mode)
@@ -350,7 +357,7 @@ class NostrBot(QObject):
 
     def send_funds_to_lnm(self, order) -> dict:
         amount = order.amount
-        invoice = self.lnm.deposit_invoice(amount)
+        invoice, hash = self.lnm.deposit_invoice(amount)
         success = False
         for i in range(5):
             if RPC.pay_invoice(invoice):

@@ -11,6 +11,7 @@ log = logging.getLogger()
 
 class Order(Model):
     order_id = CharField(unique=True)
+    deposit_id = CharField()
     user = CharField()
     order_type = CharField()
     mode = CharField()
@@ -80,6 +81,7 @@ class OrderManager(QObject):
     def new_order(self, data):
         log.log(15, f"new_order({data=})")
         order = Order(order_id=data['order_id'],
+                      deposit_id='',
                       user=data['user'],
                       amount=data['amount'],
                       order_type=data['order_type'],
@@ -104,6 +106,8 @@ class OrderManager(QObject):
         order = self.get_order_by_id(order_id)
         order.invoice = invoice
         order.status = 'unpaid'
+        if 'hash' in data.keys():
+            order.deposit_id = data['hash']
         order.save()
         self.order_status_unpaid.emit(order)
         self.order_status_updated.emit(order)
