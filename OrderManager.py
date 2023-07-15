@@ -19,6 +19,7 @@ class Order(Model):
     order_type = CharField()
     mode = CharField()
     amount = IntegerField()
+    fee = IntegerField()
     leverage = IntegerField()
     trade_amount = IntegerField()
     margin = IntegerField()
@@ -114,6 +115,7 @@ class OrderManager(QObject):
                       leverage=data['leverage'],
                       trade_amount=0,
                       margin=0,
+                      fee = 0,
                       open_price=0,
                       close_price=0,
                       mode=data['mode'],
@@ -182,10 +184,12 @@ class OrderManager(QObject):
         order_id = data['order_id']
         price = data['price']
         lnm_id = data['lnm_id']
+        fee = data['fee']
         order = self.get_order_by_id(order_id)
         order.status = 'open'
         order.trade_amount = data['trade_amount']
         order.margin = data['margin']
+        order.fee = fee
         order.open_price = price
         order.lnm_id = lnm_id
         order.save()
@@ -199,19 +203,19 @@ class OrderManager(QObject):
         order = self.get_order_by_id(order_id)
         order.status = 'closed'
         order.close_price = price
-        log.log(15, f"{order.amount=}, {order.trade_amount=}, {order.margin=}, {order.leverage=}")
+        log.log(15, f"{order.amount=}, {order.trade_amount=}, {order.margin=}, {order.leverage=}, {order.fee=}")
 
         profit_percent = (order.close_price / order.open_price) - 1
-        log.log(15, f"{profit_percent=}")
+        log.log(15, f"{order.close_price=}, {order.open_price=} {profit_percent=}")
 
         if order.order_type == 'short':
             profit_percent = -profit_percent
             profit = math.floor(order.trade_amount * profit_percent)
         else:
             profit = math.ceil(order.trade_amount * profit_percent)
+
         log.log(15, f"{profit=}")
-        fee = abs(order.amount - order.margin)
-        log.log(15, f"{fee=}")
+        fee = order.fee
         order.profit = profit - fee
         order.save()
         self.order_status_close.emit(order)
@@ -222,7 +226,7 @@ class OrderManager(QObject):
         log.log(15, f"set_order_withdraw_requested({data=})")
         withdraw_mode = data['withdraw_mode']
         closed_orders = Order.select().where(
-            ((Order.status == 'closed') | (Order.status == 'withdraw_failed'))
+            ((Order.status == 'closed') | (Order.status == 'withdraw_failed') | (Order.status == 'withdraw_requested'))
             & (Order.user == data['user'])
         )
 
@@ -231,8 +235,8 @@ class OrderManager(QObject):
         total_amount = 0
         batch_list = []
         for order in closed_orders:
-            log.log(15,f"{order}")
-            balance = order.margin - order.profit
+            log.log(15, f"{order.margin=}, {order.profit}")
+            balance = order.amount + order.profit
             if balance > 0:
                 total_amount += balance
                 batch_list.append(order)
@@ -287,7 +291,7 @@ class OrderManager(QObject):
         total_amount = 0
         batch_list = []
         for order in orders:
-            balance = order.margin - order.profit
+            balance = order.amount + order.profit
             if balance > 0:
                 total_amount += balance
                 batch_list.append(order)

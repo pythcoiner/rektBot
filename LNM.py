@@ -11,7 +11,7 @@ log = logging.getLogger()
 
 class LNMarkets:
     
-    def __init__(self, key, secret, passphrase, fee=0.002):
+    def __init__(self, key, secret, passphrase, fee=0.003):
         options = {'key': key,
                    'secret': secret,
                    'passphrase': passphrase,
@@ -57,8 +57,28 @@ class LNMarkets:
     def open_short(self, margin, leverage):
         return self.open_market_position('short', margin, leverage)
 
+    def estimate_dollar_value(self, amount: int, leverage: int):
+        """
+        :param amount: sats
+        :param leverage: min 1 max 100
+        :return: Dollar value of the position
+        """
+        price = self.get_price()
+        fee = math.ceil(amount * leverage * self.fee)
+        margin = amount - fee
+        dollar_value = margin * leverage / (100 * 1000 * 1000) * price
+        return dollar_value, margin, price
+
+    def estimate_fee(self, amount, leverage):
+        dollar_value, _, price = self.estimate_dollar_value(amount, leverage)
+        dollar_value = math.floor(dollar_value)
+        trade_amount = math.ceil((dollar_value / price) * 100*1000*1000)
+        fee = trade_amount * self.fee
+        margin = amount - fee
+        return fee, margin, trade_amount
+
     def open_market_position(self, side, margin, leverage=100, tp=None):
-        # TODO: Handle TP + SL
+        # TODO add safety SL
         log.log(15, f"open_market_position({side=}, {margin=}, {leverage=}, {tp=})")
         if side == 'long':
             side = 'b'
@@ -67,15 +87,13 @@ class LNMarkets:
         else:
             return
 
-        fee = math.ceil(margin * leverage * self.fee)
-        margin = margin - fee
-        trade_amount = math.floor(margin * leverage)
+        fee, margin, trade_amount = self.estimate_fee(margin, leverage)
 
         params = {
             'type': 'm',
             'side': side,
-            'leverage': leverage,
-            'margin': margin,  # sats
+            'leverage': int(leverage),
+            'margin': int(margin),  # sats
             # 'quantity': 1, #dollar
         }
         if tp:
@@ -94,6 +112,7 @@ class LNMarkets:
             'price': ret['price'],
             'trade_amount': trade_amount,
             'margin': margin,
+            'fee': fee,
         }
         return out
 

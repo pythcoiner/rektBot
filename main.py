@@ -5,6 +5,8 @@ import subprocess
 from copy import deepcopy as copy
 import signal
 import sys
+import random
+import math
 
 import json
 import ssl
@@ -23,14 +25,16 @@ from LNM import LNMarkets
 from OrderManager import OrderManager
 from lud_16 import LUD16
 
-# TODO: check msg tp too close when no tp define by user
-# TODO: LNM fee calculated on int value in $
-# TODO: profit calculation is wrong => bot loose money
-# TODO: cannot parse invoice from Phoenix
-# TODO: Random TP
-# TODO: min amount = 100sats
-# TODO: how to check that LNM deposit invoice expired?
 
+# TODO: charge for withdraw fee??
+# TODO: Make quick doc
+# TODO: cannot parse invoice from Phoenix
+# TODO: how to check that LNM deposit invoice expired?
+# TODO: if open order fail handle refund
+# TODO: control max outbound fee on CLN
+# TODO: use stable LUD16 implementation
+
+# TODO: add close function
 # TODO: handle funding fee
 # TODO: Backup
 # TODO: Cleaner Log []
@@ -119,7 +123,12 @@ class NostrBot(QObject):
         log.info('Start NostrBot')
         log.info(f'Using pubkey {self.private_key.public_key.bech32()}')
 
-        self.lnm = LNMarkets(config.lnmarkets['key'], config.lnmarkets['secret'], config.lnmarkets['passphrase'])
+        self.fee = 0.002
+
+        key = config.lnmarkets['key']
+        secret = config.lnmarkets['secret']
+        passphrase = config.lnmarkets['passphrase']
+        self.lnm = LNMarkets(key, secret, passphrase, self.fee)
 
         self.order_manager = OrderManager()
         self.order_manager.order_status_new.connect(self.on_new_order)
@@ -309,7 +318,9 @@ class NostrBot(QObject):
 
     # Handle notification
     def handle_event(self, event):
-        #if event type is METADATA
+        # TODO: refactor (split) handle_event()
+
+        #if event type is METADATA (used for get LUD16 lnurl)
         if event['kind'] == EventKind.SET_METADATA:
             pubkey = event['pubkey']
             content = json.loads(event['content'])
@@ -318,10 +329,10 @@ class NostrBot(QObject):
                 self.lnurl_list[pubkey] = content['lud16']
                 log.log(15,f"Update lud16 for {pubkey=}: {content['lud16']}")
 
-        # in event not yet handled
+        # if new event
         elif not self.in_history(event['id']):
             log.info(f"Get notification")
-            log.log(15,f"Event:{event}")
+            log.log(15, f"Event:{event}")
 
             note_id = event['id']
             note_from = event['pubkey']
@@ -379,9 +390,22 @@ class NostrBot(QObject):
                 log.log(15, f"{amount=}, {tp=}")
                 if amount:
 
-                    #  TODO: check minimal amount and leverage (amount * leverage) > 1$
-
                     amount = int(amount[0])
+
+                    trade_amount_dollar, _, _ = self.lnm.estimate_dollar_value(amount, leverage)
+                    log.log(15, f"{type(trade_amount_dollar)=}, {trade_amount_dollar}")
+                    if trade_amount_dollar < 1.0:
+                        msg = f"Position value < 1$ ({trade_amount_dollar}$), increase margin or leverage!"
+                        self.reply_to(note_id, note_from, msg, note_type)
+                        return
+
+                    # # min amount
+                    # if amount < 100:
+                    #     amount = 100
+                    # max amount
+                    if amount > 2000:
+                        amount = 2000
+
                     if tp:
                         tp = int(tp[0])
                     else:
@@ -451,27 +475,47 @@ class NostrBot(QObject):
     
     def on_funded(self, order):
         log.info(f'Funding success for invoice {order.order_id[:5]}_{order.order_id[-5:]}')
+        log.log(15, f"on_funded({order=})")
         # TODO: Log it in separate records
         # TODO: handle if position fail to open
-        # TODO: Handle TP
-        if order.tp > 0:
-            tp = order.tp
-        else:
-            tp = None
-        if tp:
-            price = self.lnm.get_price()
-            if order.order_type == 'long':
-                if tp < price + 100:
-                    tp = None
+        price = self.lnm.get_price()
 
-            elif order.order_type == 'short':
-                if tp > price - 100:
-                    tp = None
-        if order.tp != tp:
+        tp = order.tp
+
+        # if TP < minimum gap
+        if order.order_type == 'long':
+            if tp < price + 100:
+                tp = 0
+        elif order.order_type == 'short':
+            if tp > price - 100:
+                tp = 0
+
+        # If no tp selected
+        if tp < 1:
+            # tp = None
+            delta = random.randint(50, 300)/10000
+
             if order.order_type == 'long':
-                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll hodl or be rekt!", order.mode)
+                tp = round((1 + delta) * price)
             else:
-                self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll be hedged or rekt!", order.mode)
+                tp = round((1 - delta) * price)
+            order.tp = tp
+            order.save()
+            log.log(15, f"Random TP set at {tp} ({delta=})")
+
+        if order.order_type == 'long':
+            if tp < price + 100:
+                tp = None
+        elif order.order_type == 'short':
+            if tp > price - 100:
+                tp = None
+
+        # if tp and (order.tp != tp):
+        #     if order.order_type == 'long':
+        #         self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll hodl or be rekt!", order.mode)
+        #     else:
+        #         self.reply_to(order.order_id, order.user, "TP too close, disabled, you'll be hedged or rekt!", order.mode)
+
         position = self.lnm.open_market_position(order.order_type, order.amount, order.leverage, tp)
         if not position:
             log.info("Open position fail!")
@@ -480,11 +524,13 @@ class NostrBot(QObject):
         lnm_id = position['id']
         trade_amount = position['trade_amount']
         margin = position['margin']
+        fee = position['fee']
         params = {'order_id': order.order_id,
                   'price': open_price,
                   'lnm_id': lnm_id,
                   'trade_amount': trade_amount,
                   'margin': margin,
+                  'fee': fee,
                   }
         self.set_order_open.emit(params)
 
@@ -494,12 +540,13 @@ class NostrBot(QObject):
         #  TODO: notify admin
 
     def on_open(self, order):
-        log.info(f'Trade open at {order.open_price} for order {order.order_id[:5]}_{order.order_id[-5:]}')
+        log.info(f'Trade open at {order.open_price} for order {order.order_id[:5]}_{order.order_id[-5:]}, TP={order.tp}')
         if order.order_type == 'long':
             side = 'LONG'
         else:
             side = 'SHORT'
-        self.reply_to(order.order_id, order.user, f'{side} open at {order.open_price}', order.mode)
+        msg = f'{side} open at {order.open_price}, TP={order.tp}'
+        self.reply_to(order.order_id, order.user, msg, order.mode)
     
     def on_close(self, order):
         msg = f'Trade close at {order.close_price} for order {order.order_id[:5]}_{order.order_id[-5:]}'
@@ -509,7 +556,7 @@ class NostrBot(QObject):
         if order.profit > 0:
             msg += f'Congrats, you earn {order.profit}sats!'
         else:
-            msg += f'booooooo you get rekt of {order.profit}sats!'
+            msg += f'booooooo you get rekt of {abs(order.profit)} sats!'
         msg += f'\n You can now withdraw your fund, just send "lnurl" or "invoice" by DM!'
         self.reply_to(order.order_id, order.user, msg, order.mode)
         # TODO: cleanup db and log history?
