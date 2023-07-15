@@ -402,8 +402,8 @@ class NostrBot(QObject):
                     # if amount < 100:
                     #     amount = 100
                     # max amount
-                    if amount > 2000:
-                        amount = 2000
+                    if amount > 300000:
+                        amount = 300000
 
                     if tp:
                         tp = int(tp[0])
