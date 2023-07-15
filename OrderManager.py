@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Union
 import logging
@@ -31,6 +32,11 @@ class Order(Model):
     withdraw_type = CharField()
     withdraw_data = CharField()
 
+    def __repr__(self):
+        return f"Order({self.order_id=}, {self.deposit_id=}, {self.user=}, {self.order_type=}, {self.mode=}, {self.amount=}, {self.leverage=}," \
+               f" {self.trade_amount=}, {self.margin=}, {self.status=}, {self.profit=}, {self.invoice=}, {self.lnm_id=}, {self.tp=}, {self.open_price=}," \
+               f" {self.close_price=}, {self.withdraw_type=}, {self.withdraw_data=} )"
+
     class Meta:
         database = None
 
@@ -48,6 +54,7 @@ class OrderManager(QObject):
     order_status_close = Signal(object)
     order_status_withdraw_requested = Signal(object)
     order_status_withdraw_done = Signal(object)
+    order_status_withdraw_fail = Signal(object)
     order_withdraw_notify_amount = Signal(object)
     order_status_deleted = Signal(object)
 
@@ -62,6 +69,12 @@ class OrderManager(QObject):
         else:
             self.db.connect()
             self.db.create_tables([Order], safe=True)
+
+    def dump_db(self):
+        # orders = list(Order)
+        orders = [order for order in Order.select().dicts()]
+        for order in orders:
+            print(json.dumps(order, indent=2))
 
     def get_order_by_id(self, order_id) -> Union[Order | None]:
         log.log(15, f"get_order_by_id({order_id=})")
@@ -209,13 +222,16 @@ class OrderManager(QObject):
         log.log(15, f"set_order_withdraw_requested({data=})")
         withdraw_mode = data['withdraw_mode']
         closed_orders = Order.select().where(
-            (Order.status == 'closed')
+            ((Order.status == 'closed') | (Order.status == 'withdraw_failed'))
             & (Order.user == data['user'])
         )
-        # closed_orders = Order.objects.filter(status='closed', user=data['user'])
+
+        log.log(15, f"{closed_orders=}")
+
         total_amount = 0
         batch_list = []
         for order in closed_orders:
+            log.log(15,f"{order}")
             balance = order.margin - order.profit
             if balance > 0:
                 total_amount += balance
@@ -248,6 +264,14 @@ class OrderManager(QObject):
             order.status = 'withdraw_done'
             order.save()
         self.order_status_withdraw_done.emit(data)
+
+    def set_order_status_withdraw_fail(self, data):
+        log.log(15, f"set_order_status_withdraw_fail({data=})")
+        order_id = data['order_id']
+        order = self.get_order_by_id(order_id)
+        order.status = 'withdraw_failed'
+        order.save()
+        self.order_status_withdraw_fail.emit(data)
 
     def set_order_withdraw_receive_invoice(self, data):
         log.log(15, f"set_order_withdraw_receive_invoice({data=})")

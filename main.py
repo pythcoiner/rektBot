@@ -23,15 +23,12 @@ from LNM import LNMarkets
 from OrderManager import OrderManager
 from lud_16 import LUD16
 
-# TODO: withdraw from LNM send message fail but success and user can fill out LNM account
+# TODO: check msg tp too close when no tp define by user
 # TODO: LNM fee calculated on int value in $
-# TODO: on withdraw fail => order status change back to close status => move to withdraw_fail instead!
-# TODO: lnurl withdraw fail from CLN check with manual invoice
 # TODO: profit calculation is wrong => bot loose money
 # TODO: cannot parse invoice from Phoenix
 # TODO: Random TP
 # TODO: min amount = 100sats
-# TODO: delete msg on next step
 # TODO: how to check that LNM deposit invoice expired?
 
 # TODO: handle funding fee
@@ -40,7 +37,6 @@ from lud_16 import LUD16
 # TODO: DB recovery log
 # TODO: delete paid invoices from CLN and copy data to rektBot.log
 # TODO: handle every case when API call not success
-# TODO: check msg tp too close when no tp define by user
 # TODO: move history to a peewee DB
 
 logging.addLevelName(15, "DEBG")
@@ -95,6 +91,7 @@ class NostrBot(QObject):
     set_order_withdraw_requested = Signal(object)
     set_order_withdraw_receive_invoice = Signal(object)
     set_order_withdraw_done = Signal(object)
+    set_order_status_withdraw_fail = Signal(object)
     del_order = Signal(object)
 
     def __init__(self, pk):
@@ -152,6 +149,7 @@ class NostrBot(QObject):
         self.set_order_withdraw_requested.connect(self.order_manager.set_order_withdraw_requested)
         self.set_order_withdraw_receive_invoice.connect(self.order_manager.set_order_withdraw_receive_invoice)
         self.set_order_withdraw_done.connect(self.order_manager.set_order_withdraw_done)
+        self.set_order_status_withdraw_fail.connect(self.order_manager.set_order_status_withdraw_fail)
         self.del_order.connect(self.order_manager.del_order)
 
     def interupt(self, a, b):
@@ -552,7 +550,7 @@ class NostrBot(QObject):
                     'order_id': order_id,
                     'price': price,
                 }
-                self.set_order_close.emit(data)
+                self.set_order_status_withdraw_fail.emit(data)
             # Notify user
             msg = 'Cannot process to withdraw, retry later!'
             self.reply_to(None, user, msg, 'dm')
@@ -609,8 +607,9 @@ class NostrBot(QObject):
 
     def on_withdraw_done(self, data):
         log.log(15,f"on_withdraw_done({data=})")
+        user = data['batch_list'][0].user
         msg = f"Successfully withdraw {data['total_amount']}sats!"
-        self.reply_to(None, data['user'], msg, 'dm')
+        self.reply_to(None, user, msg, 'dm')
 
     def on_deleted(self, order):
         pass
