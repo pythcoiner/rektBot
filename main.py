@@ -27,15 +27,14 @@ from lud_16 import LUD16
 
 
 # TODO: charge for withdraw fee??
-# TODO: Make quick doc
 # TODO: cannot parse invoice from Phoenix
+# TODO: use stable LUD16 implementation
 # TODO: how to check that LNM deposit invoice expired?
 # TODO: if open order fail handle refund
 # TODO: control max outbound fee on CLN
-# TODO: use stable LUD16 implementation
+
 
 # TODO: add close function
-# TODO: handle funding fee
 # TODO: Backup
 # TODO: Cleaner Log []
 # TODO: DB recovery log
