@@ -8,3 +8,4 @@ history
 bot.sqlite
 config.py
 business_models.md
+users.pubkey
